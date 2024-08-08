@@ -37,31 +37,44 @@ impl<const B: usize> BlockNode<B> {
 
 
     /// Assume `alloc_size` <= `block_size`
-    fn new_alloc(block_size: usize, address: NonNull<u8>, alloc_size: usize) -> Self {
-        Self {
-            block_address: address,
-            size: block_size,
-            state: Self::alloc_down(address, block_size, alloc_size)
-        }
+    fn new_alloc(block_size: usize, address: NonNull<u8>, alloc_size: usize) -> (Self, usize) {
+        
+        let (state, allocated) =  Self::alloc_down(address, block_size, alloc_size);
+
+        (
+            Self {
+                block_address: address,
+                size: block_size,
+                state
+            },
+            allocated
+        )
     }
 
 
-    fn alloc_down(block_address: NonNull<u8>, block_size: usize, alloc_size: usize) -> BlockState<B> {
+    fn alloc_down(block_address: NonNull<u8>, block_size: usize, alloc_size: usize) -> (BlockState<B>, usize) {
 
         let half_size = block_size / 2;
 
         if alloc_size > half_size || block_size == B {
-            BlockState::AllocatedLeaf
+            (BlockState::AllocatedLeaf, block_size)
         } else {
-            BlockState::Parent(
-                Box::new(BlockNode::new_alloc(half_size, block_address, alloc_size)),
-                Box::new(BlockNode::new(half_size, unsafe { NonNull::new_unchecked(block_address.as_ptr().byte_add(half_size)) }))
+
+            let (a, allocated) = BlockNode::new_alloc(half_size, block_address, alloc_size);
+
+            (
+                BlockState::Parent(
+                    Box::new(a),
+                    Box::new(BlockNode::new(half_size, unsafe { NonNull::new_unchecked(block_address.as_ptr().byte_add(half_size)) }))
+                ),
+                allocated
             )
+
         }
     }
 
 
-    pub fn alloc(&mut self, alloc_size: usize) -> Option<NonNull<u8>> {
+    pub fn alloc(&mut self, alloc_size: usize) -> Option<(NonNull<u8>, usize)> {
         
         match &mut self.state {
 
@@ -71,10 +84,11 @@ impl<const B: usize> BlockNode<B> {
                     None
                 } else {
 
-                    self.state = Self::alloc_down(self.block_address, self.size, alloc_size);
+                    let (state, allocated) = Self::alloc_down(self.block_address, self.size, alloc_size);
+                    self.state = state;
 
                     // Whether it's the whole block or the first child, they share the base address
-                    Some(self.block_address)
+                    Some((self.block_address, allocated))
                 }
             },
 
@@ -94,7 +108,7 @@ impl<const B: usize> BlockNode<B> {
     }
 
 
-    pub fn free(&mut self, ptr: NonNull<u8>) -> Result<(), AllocError> {
+    pub fn free(&mut self, ptr: NonNull<u8>) -> Result<usize, AllocError> {
         
         match &mut self.state {
 
@@ -102,24 +116,24 @@ impl<const B: usize> BlockNode<B> {
 
             BlockState::Parent(a, b) => {
 
-                if ptr < b.block_address {
-                    a.free(ptr)?;
+                let freed = if ptr < b.block_address {
+                    a.free(ptr)?
                 } else {
-                    b.free(ptr)?;
-                }
+                    b.free(ptr)?
+                };
 
                 if matches!((&a.state, &b.state), (BlockState::FreeLeaf, BlockState::FreeLeaf)) {
                     self.state = BlockState::FreeLeaf;
                 }
 
-                Ok(())
+                Ok(freed)
             },
 
             BlockState::AllocatedLeaf => {
 
                 if self.block_address == ptr {
                     self.state = BlockState::FreeLeaf;
-                    Ok(())
+                    Ok(self.size)
                 } else {
                     Err(AllocError::UnalignedFree)
                 }
@@ -130,6 +144,7 @@ impl<const B: usize> BlockNode<B> {
 }
 
 
+#[derive(Debug, Clone, Copy)]
 pub enum AllocError {
 
     /// Not enough memory to perform the requested allocation
@@ -158,9 +173,14 @@ pub enum AllocError {
 */
 pub struct BuddyAllocator<const M: usize, const B: usize> {
     
+    /// The actual buffer where the heap is stored
     memory: [MaybeUninit<u8>; M],
+    /// A tree that keeps track of the allocated and free blocks
     alloc_table: BlockNode<B>,
+    /// The highest address of the heap
     upper_memory_bound: NonNull<u8>,
+    /// The total amount of free memory, which may not be available as a whole due to fragmentation
+    total_free: usize,
     _pin: PhantomPinned
 
 }
@@ -179,6 +199,7 @@ where
             #[allow(invalid_value)]
             alloc_table: unsafe { MaybeUninit::uninit().assume_init() },
             upper_memory_bound: NonNull::dangling(),
+            total_free: M,
             _pin: PhantomPinned::default()
         };
 
@@ -199,8 +220,30 @@ where
     pub fn alloc(&mut self, size: usize) -> Result<NonNull<u8>, AllocError> {
         if size == 0 {
             Err(AllocError::ZeroAllocation)
+        } else if let Some((ptr, allocated)) = self.alloc_table.alloc(size) {
+            self.total_free -= allocated;
+            Ok(ptr)
         } else {
-            self.alloc_table.alloc(size).ok_or(AllocError::OutOfMemory)
+            Err(AllocError::OutOfMemory)
+        }
+    }
+
+
+    pub fn free_nonnull(&mut self, ptr: NonNull<u8>) -> Result<(), AllocError> {
+
+        if ptr >= self.upper_memory_bound {
+            Err(AllocError::FreeOutOfBounds)
+        } else {
+
+            match self.alloc_table.free(ptr) {
+
+                Ok(freed) => {
+                    self.total_free += freed;
+                    Ok(())
+                },
+
+                Err(e) => Err(e)
+            }
         }
     }
 
@@ -208,16 +251,22 @@ where
     pub fn free(&mut self, ptr: *const u8) -> Result<(), AllocError> {
 
         if let Some(ptr) = NonNull::new(ptr as *mut u8) {
-
-            if ptr >= self.upper_memory_bound {
-                Err(AllocError::FreeOutOfBounds)
-            } else {
-                self.alloc_table.free(ptr)
-            }
-
+            self.free_nonnull(ptr)
         } else {
             Err(AllocError::NullPtrFree)
         }
+    }
+
+
+    /// Return the total amount of free memory in the heap.
+    /// Note that this memory may not be usable as a whole because of fragmentation.
+    pub const fn total_free(&self) -> usize {
+        self.total_free
+    }
+
+
+    pub const fn heap_size(&self) -> usize {
+        M
     }
 
 }
@@ -235,7 +284,9 @@ mod tests {
     #[test]
     fn check_new_allocator() {
 
-        let _alloc = BuddyAllocator::<1024, 8>::new();
+        let alloc = BuddyAllocator::<1024, 8>::new();
+
+        assert_eq!(alloc.total_free(), alloc.heap_size());
 
     }
 
@@ -274,6 +325,28 @@ mod tests {
         assert!(matches!(alloc.free(ptr::null()), Err(AllocError::NullPtrFree)));
         assert!(matches!(alloc.free(usize::MAX as *const u8), Err(AllocError::FreeOutOfBounds)));
     }
+
+
+    #[test]
+    fn check_full_free() {
+
+        let mut alloc = BuddyAllocator::<1024, 8>::new();
+
+        let blocks = [
+            1,2,3,4,5,6,7,8,9,32,32,53,12,76,50,21,127
+        ];
+
+        let ptrs: Vec<NonNull<u8>> = blocks.iter()
+            .map(|&s| alloc.alloc(s as usize).unwrap())
+            .collect();
+
+        for ptr in ptrs {
+            assert!(alloc.free_nonnull(ptr).is_ok());
+        }
+
+        assert_eq!(alloc.total_free(), alloc.heap_size());
+
+    }   
 
 }
 

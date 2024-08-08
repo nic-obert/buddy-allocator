@@ -6,10 +6,12 @@ Project Description
 
 ### Todo
 
+- [ ] implement defragmentation  
 - [ ] Add a readme  
 
 ### In Progress
 
+- [ ] keep track of how much memory is free/allocated  
 - [ ] write tests  
 
 ### Done ✓
