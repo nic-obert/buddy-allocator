@@ -8,11 +8,16 @@ use std::ptr::NonNull;
 use const_assert::{Assert, IsTrue};
 
 
-/// The state of an allocation tree node
+/// The state of an allocation tree node.
 enum BlockState<const B: usize> {
 
+    /// The node represents a free memory block.
     FreeLeaf,
+
+    // The node represents a memory block that has been split in two buddies.
     Parent (Box<BlockNode<B>>, Box<BlockNode<B>>),
+
+    // The node represents an already allocated memory block.
     AllocatedLeaf
 
 }
@@ -45,6 +50,7 @@ impl<const B: usize> BlockNode<B> {
     } 
 
 
+    /// Create a new node and propagate the allocation.
     /// Assume `alloc_size` <= `block_size`
     fn new_alloc(block_size: usize, address: NonNull<u8>, alloc_size: usize) -> (Self, usize) {
         
@@ -66,9 +72,13 @@ impl<const B: usize> BlockNode<B> {
 
         let half_size = block_size / 2;
 
+        // If the requested size is greater than half the block size, the block cannot be split.
+        // Also, the block cannot be split further if it's a zero-order block.
         if alloc_size > half_size || block_size == B {
             (BlockState::AllocatedLeaf, block_size)
+
         } else {
+            // Split the block in two identical buddy blocks and propagate the allocation.
 
             let (a, allocated) = BlockNode::new_alloc(half_size, block_address, alloc_size);
 
@@ -92,9 +102,12 @@ impl<const B: usize> BlockNode<B> {
             BlockState::FreeLeaf => {
 
                 if self.size < alloc_size {
+                    // The block is too small for the requested size.
                     None
+
                 } else {
 
+                    // If the block is big enough for the requested size, propagate the allocation.
                     let (state, allocated) = Self::alloc_down(self.block_address, self.size, alloc_size);
                     self.state = state;
 
@@ -105,6 +118,7 @@ impl<const B: usize> BlockNode<B> {
 
             BlockState::Parent(a, b) => {
                 
+                // Check if any of the children can allocate the requested memory
                 if let Some(ptr) = a.alloc(alloc_size) {
                     Some(ptr)
                 } else if let Some(ptr) = b.alloc(alloc_size) {
@@ -124,16 +138,19 @@ impl<const B: usize> BlockNode<B> {
         
         match &mut self.state {
 
+            // Cannot free a free block.
             BlockState::FreeLeaf => Err(AllocError::DoubleFree),
 
             BlockState::Parent(a, b) => {
 
+                // Free the node that contains the given pointer.
                 let freed = if ptr < b.block_address {
                     a.free(ptr)?
                 } else {
                     b.free(ptr)?
                 };
 
+                // If both children nodes are free, merge them into a single block to avoid fragmentation.
                 if matches!((&a.state, &b.state), (BlockState::FreeLeaf, BlockState::FreeLeaf)) {
                     self.state = BlockState::FreeLeaf;
                 }
@@ -143,6 +160,7 @@ impl<const B: usize> BlockNode<B> {
 
             BlockState::AllocatedLeaf => {
 
+                // Only allow freeing the block if the given pointer matches the block's start address.
                 if self.block_address == ptr {
                     self.state = BlockState::FreeLeaf;
                     Ok(self.size)
@@ -257,6 +275,8 @@ where
     pub fn alloc_bytes(&mut self, size: usize) -> Result<NonNull<u8>, AllocError> {
 
         if size == 0 {
+            // Disallow allocating zero bytes.
+            // Think: if zero bytes were to be allocated, what is the returned pointer supposed to point to?
             Err(AllocError::ZeroAllocation)
 
         } else if let Some((ptr, allocated)) = self.alloc_table.alloc(size) {
@@ -280,6 +300,7 @@ where
         };
 
         if ptr >= self.upper_memory_bound {
+            // Cannot free memory outside of the allocator's heap
             Err(AllocError::FreeOutOfBounds)
 
         } else {
