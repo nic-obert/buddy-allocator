@@ -1,13 +1,14 @@
 #![allow(incomplete_features)]
 #![feature(generic_const_exprs)]
 
-use std::mem::MaybeUninit;
+use std::mem::{self, MaybeUninit};
 use std::marker::PhantomPinned;
 use std::ptr::NonNull;
 
 use const_assert::{Assert, IsTrue};
 
 
+/// The state of an allocation tree node
 enum BlockState<const B: usize> {
 
     FreeLeaf,
@@ -17,16 +18,24 @@ enum BlockState<const B: usize> {
 }
 
 
+/// Node of the allocation tree.
+/// Each node is associated with a memory block.
 struct BlockNode<const B: usize> {
 
+    /// Start address of the associated memory block
     block_address: NonNull<u8>,
+
+    /// Size of the associated memory block in bytes.
     size: usize,
+
+    /// State of the associated memory block (free, allocated, split).
     state: BlockState<B>
 
 }
 
 impl<const B: usize> BlockNode<B> {
 
+    /// Create a new free leaf node.
     pub const fn new(size: usize, address: NonNull<u8>) -> Self {
         Self {
             block_address: address,
@@ -52,6 +61,7 @@ impl<const B: usize> BlockNode<B> {
     }
 
 
+    /// Recursively propagate the allocation down to the smallest memory block that can fit the requested size.
     fn alloc_down(block_address: NonNull<u8>, block_size: usize, alloc_size: usize) -> (BlockState<B>, usize) {
 
         let half_size = block_size / 2;
@@ -74,6 +84,7 @@ impl<const B: usize> BlockNode<B> {
     }
 
 
+    /// Recursively try to allocate the requested size.
     pub fn alloc(&mut self, alloc_size: usize) -> Option<(NonNull<u8>, usize)> {
         
         match &mut self.state {
@@ -108,6 +119,7 @@ impl<const B: usize> BlockNode<B> {
     }
 
 
+    /// Recursively try to free the given pointer.
     pub fn free(&mut self, ptr: NonNull<u8>) -> Result<usize, AllocError> {
         
         match &mut self.state {
@@ -144,6 +156,7 @@ impl<const B: usize> BlockNode<B> {
 }
 
 
+/// Enum representing errors that may happen during allocation and freeing.
 #[derive(Debug, Clone, Copy)]
 pub enum AllocError {
 
@@ -173,14 +186,19 @@ pub enum AllocError {
 */
 pub struct BuddyAllocator<const M: usize, const B: usize> {
     
-    /// The actual buffer where the heap is stored
+    /// The actual buffer where the heap is stored.
     memory: [MaybeUninit<u8>; M],
-    /// A tree that keeps track of the allocated and free blocks
+
+    /// A binary  tree that keeps track of the allocated and free blocks.
     alloc_table: BlockNode<B>,
-    /// The highest address of the heap
+
+    /// The highest address of the heap.
     upper_memory_bound: NonNull<u8>,
-    /// The total amount of free memory, which may not be available as a whole due to fragmentation
+
+    /// The total amount of free memory, which may not be available as a whole due to fragmentation.
     total_free: usize,
+
+    /// Tell the compiler this struct should not be moved.
     _pin: PhantomPinned
 
 }
@@ -192,6 +210,7 @@ where
     Assert<{ M % B == 0 }>: IsTrue
 {
 
+    /// Create a new allocator.
     pub fn new() -> Self {
 
         let mut res = Self {
@@ -203,12 +222,15 @@ where
             _pin: PhantomPinned::default()
         };
 
+        // Get the lower bound of the heap
         let base_ptr = unsafe { 
             NonNull::new_unchecked(res.memory.as_mut_ptr() as *mut u8)
         };
 
+        // Initialize the allocation table
         res.alloc_table = BlockNode::new(M, base_ptr);
 
+        // Calculate the upper bound of the heap
         res.upper_memory_bound = unsafe {
             NonNull::new_unchecked(base_ptr.as_ptr().byte_add(M))
         };
@@ -217,27 +239,55 @@ where
     }
 
 
-    pub fn alloc(&mut self, size: usize) -> Result<NonNull<u8>, AllocError> {
+    /// Allocate a memory block big enough to store at least the size of `T`.
+    /// Return a pointer to the start of the allocated block.
+    /// Pointers allocated throuch this allocator must be freed through this allocator as well.
+    pub fn alloc<T>(&mut self) -> Result<NonNull<T>, AllocError> {
+        unsafe {
+            mem::transmute::<Result<NonNull<u8>, AllocError>, Result<NonNull<T>, AllocError>>(
+                self.alloc_bytes(mem::size_of::<T>())
+            )
+        }
+    }
+
+
+    /// Allocate a memory block big enough to store at least `size` bytes.
+    /// Return a pointer to the start of the allocated block.
+    /// Pointers allocated throuch this allocator must be freed through this allocator as well.
+    pub fn alloc_bytes(&mut self, size: usize) -> Result<NonNull<u8>, AllocError> {
+
         if size == 0 {
             Err(AllocError::ZeroAllocation)
+
         } else if let Some((ptr, allocated)) = self.alloc_table.alloc(size) {
+            // Keep track of the free memory
             self.total_free -= allocated;
             Ok(ptr)
+
         } else {
             Err(AllocError::OutOfMemory)
         }
     }
 
 
-    pub fn free_nonnull(&mut self, ptr: NonNull<u8>) -> Result<(), AllocError> {
+    /// Free the memory block found at `ptr`.
+    /// Note that the block must have been allocated through this allocator.
+    pub fn free_nonnull<T>(&mut self, ptr: NonNull<T>) -> Result<(), AllocError> {
+
+        // Drop the generic type. It's irrelevant which type the pointer points to.
+        let ptr = unsafe {
+            mem::transmute::<NonNull<T>, NonNull<u8>>(ptr)
+        };
 
         if ptr >= self.upper_memory_bound {
             Err(AllocError::FreeOutOfBounds)
+
         } else {
 
             match self.alloc_table.free(ptr) {
 
                 Ok(freed) => {
+                    // Keep track of the free memory
                     self.total_free += freed;
                     Ok(())
                 },
@@ -248,7 +298,9 @@ where
     }
 
 
-    pub fn free(&mut self, ptr: *const u8) -> Result<(), AllocError> {
+    /// Free the memory block found at `ptr`.
+    /// Note that the block must have been allocated through this allocator.
+    pub fn free<T>(&mut self, ptr: *const T) -> Result<(), AllocError> {
 
         if let Some(ptr) = NonNull::new(ptr as *mut u8) {
             self.free_nonnull(ptr)
@@ -265,6 +317,7 @@ where
     }
 
 
+    /// Return the total size of the allocator's heap.
     pub const fn heap_size(&self) -> usize {
         M
     }
@@ -296,9 +349,9 @@ mod tests {
 
         let mut alloc = BuddyAllocator::<1024, 8>::new();
 
-        assert!(matches!(alloc.alloc(0), Err(AllocError::ZeroAllocation)));
+        assert!(matches!(alloc.alloc_bytes(0), Err(AllocError::ZeroAllocation)));
 
-        assert!(matches!(alloc.alloc(1025), Err(AllocError::OutOfMemory)));
+        assert!(matches!(alloc.alloc_bytes(1025), Err(AllocError::OutOfMemory)));
     }
 
 
@@ -307,13 +360,13 @@ mod tests {
 
         let mut alloc = BuddyAllocator::<1024, 8>::new();
 
-        assert!(alloc.alloc(1).is_ok());
-        assert!(alloc.alloc(8).is_ok());
-        assert!(alloc.alloc(9).is_ok());
-        assert!(alloc.alloc(24).is_ok());
-        assert!(alloc.alloc(32).is_ok());
-        assert!(alloc.alloc(65).is_ok());
-        assert!(alloc.alloc(1000).is_err());
+        assert!(alloc.alloc_bytes(1).is_ok());
+        assert!(alloc.alloc_bytes(8).is_ok());
+        assert!(alloc.alloc_bytes(9).is_ok());
+        assert!(alloc.alloc_bytes(24).is_ok());
+        assert!(alloc.alloc_bytes(32).is_ok());
+        assert!(alloc.alloc_bytes(65).is_ok());
+        assert!(alloc.alloc_bytes(1000).is_err());
     }
 
 
@@ -322,7 +375,7 @@ mod tests {
 
         let mut alloc = BuddyAllocator::<1024, 8>::new();
 
-        assert!(matches!(alloc.free(ptr::null()), Err(AllocError::NullPtrFree)));
+        assert!(matches!(alloc.free(ptr::null() as *const u8), Err(AllocError::NullPtrFree)));
         assert!(matches!(alloc.free(usize::MAX as *const u8), Err(AllocError::FreeOutOfBounds)));
     }
 
@@ -337,7 +390,7 @@ mod tests {
         ];
 
         let ptrs: Vec<NonNull<u8>> = blocks.iter()
-            .map(|&s| alloc.alloc(s as usize).unwrap())
+            .map(|&s| alloc.alloc_bytes(s as usize).unwrap())
             .collect();
 
         for ptr in ptrs {
@@ -349,5 +402,4 @@ mod tests {
     }   
 
 }
-
 
