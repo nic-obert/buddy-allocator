@@ -322,7 +322,7 @@ where
             mem::transmute::<NonNull<T>, NonNull<u8>>(ptr)
         };
 
-        if ptr >= self.upper_memory_bound {
+        if ptr >= self.upper_memory_bound || (ptr.as_ptr() as usize) < (self.memory.as_ptr() as usize) {
             // Cannot free memory outside of the allocator's heap
             Err(FreeError::FreeOutOfBounds)
 
