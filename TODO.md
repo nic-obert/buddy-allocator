@@ -6,7 +6,6 @@ Project Description
 
 ### Todo
 
-- [ ] implement defragmentation  
 
 ### In Progress
 

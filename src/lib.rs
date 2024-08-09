@@ -15,7 +15,7 @@ enum BlockState<const B: usize> {
     FreeLeaf,
 
     // The node represents a memory block that has been split in two buddies.
-    Parent (Box<BlockNode<B>>, Box<BlockNode<B>>),
+    Parent { left: Box<BlockNode<B>>, right: Box<BlockNode<B>> },
 
     // The node represents an already allocated memory block.
     AllocatedLeaf
@@ -80,13 +80,13 @@ impl<const B: usize> BlockNode<B> {
         } else {
             // Split the block in two identical buddy blocks and propagate the allocation.
 
-            let (a, allocated) = BlockNode::new_alloc(half_size, block_address, alloc_size);
+            let (left, allocated) = BlockNode::new_alloc(half_size, block_address, alloc_size);
 
             (
-                BlockState::Parent(
-                    Box::new(a),
-                    Box::new(BlockNode::new(half_size, unsafe { NonNull::new_unchecked(block_address.as_ptr().byte_add(half_size)) }))
-                ),
+                BlockState::Parent {
+                    left: Box::new(left),
+                    right: Box::new(BlockNode::new(half_size, unsafe { NonNull::new_unchecked(block_address.as_ptr().byte_add(half_size)) }))
+                },
                 allocated
             )
 
@@ -116,12 +116,17 @@ impl<const B: usize> BlockNode<B> {
                 }
             },
 
-            BlockState::Parent(a, b) => {
-                
+            BlockState::Parent { left, right } => {
+
+                if self.size <= alloc_size {
+                    // The requested allocation will never fit in any of the children since a child is always smaller than a parent.
+                    // Stop the search here to avoid useless recursion.
+                    None
+                }
                 // Check if any of the children can allocate the requested memory
-                if let Some(ptr) = a.alloc(alloc_size) {
+                else if let Some(ptr) = left.alloc(alloc_size) {
                     Some(ptr)
-                } else if let Some(ptr) = b.alloc(alloc_size) {
+                } else if let Some(ptr) = right.alloc(alloc_size) {
                     Some(ptr)
                 } else {
                     None
@@ -141,17 +146,17 @@ impl<const B: usize> BlockNode<B> {
             // Cannot free a free block.
             BlockState::FreeLeaf => Err(AllocError::DoubleFree),
 
-            BlockState::Parent(a, b) => {
+            BlockState::Parent { left, right } => {
 
                 // Free the node that contains the given pointer.
-                let freed = if ptr < b.block_address {
-                    a.free(ptr)?
+                let freed = if ptr < right.block_address {
+                    left.free(ptr)?
                 } else {
-                    b.free(ptr)?
+                    right.free(ptr)?
                 };
 
                 // If both children nodes are free, merge them into a single block to avoid fragmentation.
-                if matches!((&a.state, &b.state), (BlockState::FreeLeaf, BlockState::FreeLeaf)) {
+                if matches!((&left.state, &right.state), (BlockState::FreeLeaf, BlockState::FreeLeaf)) {
                     self.state = BlockState::FreeLeaf;
                 }
 
@@ -229,10 +234,16 @@ where
 {
 
     /// Create a new allocator.
-    pub fn new() -> Self {
+    pub fn new(zero_initialized: bool) -> Self {
+
+        let memory = if zero_initialized {
+            [MaybeUninit::<u8>::zeroed(); M]
+        } else {
+            [MaybeUninit::<u8>::uninit(); M]
+        };
 
         let mut res = Self {
-            memory: [MaybeUninit::<u8>::uninit(); M],
+            memory,
             #[allow(invalid_value)]
             alloc_table: unsafe { MaybeUninit::uninit().assume_init() },
             upper_memory_bound: NonNull::dangling(),
@@ -279,6 +290,10 @@ where
             // Think: if zero bytes were to be allocated, what is the returned pointer supposed to point to?
             Err(AllocError::ZeroAllocation)
 
+        } else if size > self.total_free() {
+            // Cannot ever allocate more than the total free memory
+            Err(AllocError::OutOfMemory)
+            
         } else if let Some((ptr, allocated)) = self.alloc_table.alloc(size) {
             // Keep track of the free memory
             self.total_free -= allocated;
@@ -343,6 +358,20 @@ where
         M
     }
 
+
+    /// Return the size of allocated memory. That is, the amount of memory that is currently in use.
+    pub const fn total_allocated(&self) -> usize {
+        self.heap_size() - self.total_free()
+    }
+
+
+    /// Free the entirety of the heap. 
+    /// This function is inherently unsafe because it will invalidate all pointers to previously allocated blocks.
+    pub unsafe fn free_all(&mut self) {
+        self.alloc_table = BlockNode::new(M, self.alloc_table.block_address);
+        self.total_free = M;
+    }
+
 }
 
 
@@ -358,17 +387,16 @@ mod tests {
     #[test]
     fn check_new_allocator() {
 
-        let alloc = BuddyAllocator::<1024, 8>::new();
+        let alloc = BuddyAllocator::<1024, 8>::new(false);
 
         assert_eq!(alloc.total_free(), alloc.heap_size());
-
     }
 
 
     #[test]
     fn check_allocator_bounds() {
 
-        let mut alloc = BuddyAllocator::<1024, 8>::new();
+        let mut alloc = BuddyAllocator::<1024, 8>::new(false);
 
         assert!(matches!(alloc.alloc_bytes(0), Err(AllocError::ZeroAllocation)));
 
@@ -379,7 +407,7 @@ mod tests {
     #[test]
     fn check_allocator_within_bounds() {
 
-        let mut alloc = BuddyAllocator::<1024, 8>::new();
+        let mut alloc = BuddyAllocator::<1024, 8>::new(false);
 
         assert!(alloc.alloc_bytes(1).is_ok());
         assert!(alloc.alloc_bytes(8).is_ok());
@@ -394,7 +422,7 @@ mod tests {
     #[test]
     fn check_free_bounds() {
 
-        let mut alloc = BuddyAllocator::<1024, 8>::new();
+        let mut alloc = BuddyAllocator::<1024, 8>::new(false);
 
         assert!(matches!(alloc.free(ptr::null() as *const u8), Err(AllocError::NullPtrFree)));
         assert!(matches!(alloc.free(usize::MAX as *const u8), Err(AllocError::FreeOutOfBounds)));
@@ -404,7 +432,7 @@ mod tests {
     #[test]
     fn check_full_free() {
 
-        let mut alloc = BuddyAllocator::<1024, 8>::new();
+        let mut alloc = BuddyAllocator::<1024, 8>::new(false);
 
         let blocks = [
             1,2,3,4,5,6,7,8,9,32,32,53,12,76,50,21,127
@@ -419,7 +447,6 @@ mod tests {
         }
 
         assert_eq!(alloc.total_free(), alloc.heap_size());
-
     }   
 
 }
