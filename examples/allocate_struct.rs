@@ -11,7 +11,7 @@ fn main() {
 
     // Allocate a memory block that fits an instance of MyStruct.
     let my_ptr = alloc.alloc::<MyStruct>()
-        .unwrap_or_else(|alloc_error| panic!("Allocation failed with error {:?}", alloc_error));
+        .unwrap_or_else(|err| panic!("Allocation failed with error {:?}", err));
 
     // You can also cast the NonNull<T> to a raw pointer.
     let my_ptr = my_ptr.as_ptr();
@@ -23,7 +23,7 @@ fn main() {
 
     // Free the block that contains the struct.
     alloc.free(my_ptr)
-        .unwrap_or_else(|alloc_error| panic!("Failed to free pointer {:?} with error {:?}", my_ptr, alloc_error)
+        .unwrap_or_else(|err| panic!("Failed to free pointer {:?} with error {:?}", my_ptr, err)
     );
 
 }

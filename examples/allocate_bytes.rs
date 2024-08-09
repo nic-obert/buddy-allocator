@@ -12,14 +12,14 @@ fn main() {
 
     // Allocate a memory block.
     let my_pointer: NonNull<u8> = alloc.alloc_bytes(size_to_alloc).unwrap_or_else(
-        |alloc_error| panic!("Allocation failed with error {:?}", alloc_error)
+        |err| panic!("Allocation failed with error {:?}", err)
     );
 
     // Do stuff with the pointer...
 
     // Free the memory block
     alloc.free_nonnull(my_pointer).unwrap_or_else(
-        |alloc_error| panic!("Failed to free pointer {:?} with error {:?}", my_pointer,alloc_error)
+        |err| panic!("Failed to free pointer {:?} with error {:?}", my_pointer, err)
     ); 
 
 }

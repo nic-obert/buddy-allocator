@@ -19,14 +19,14 @@ let size_to_alloc: usize = 16;
 
 // Allocate a memory block.
 let my_pointer: NonNull<u8> = alloc.alloc_bytes(size_to_alloc).unwrap_or_else(
-    |alloc_error| panic!("Allocation failed with error {:?}", alloc_error)
+    |err| panic!("Allocation failed with error {:?}", err)
 );
 
 // Do stuff with the pointer...
 
 // Free the memory block
 alloc.free_nonnull(my_pointer).unwrap_or_else(
-    |alloc_error| panic!("Failed to free pointer {:?} with error {:?}", my_pointer,alloc_error)
+    |err| panic!("Failed to free pointer {:?} with error {:?}", my_pointer, err)
 ); 
 
 ```
@@ -41,7 +41,7 @@ struct MyStruct (usize, usize, u32);
 
 // Allocate a memory block that fits an instance of MyStruct.
 let my_ptr = alloc.alloc::<MyStruct>()
-    .unwrap_or_else(|alloc_error| panic!("Allocation failed with error {:?}", alloc_error));
+    .unwrap_or_else(|err| panic!("Allocation failed with error {:?}", err));
 
 // You can also cast the NonNull<T> to a raw pointer.
 let my_ptr = my_ptr.as_ptr();
@@ -53,7 +53,7 @@ unsafe {
 
 // Free the block that contains the struct.
 alloc.free(my_ptr)
-    .unwrap_or_else(|alloc_error| panic!("Failed to free pointer {:?} with error {:?}", my_ptr, alloc_error)
+    .unwrap_or_else(|err| panic!("Failed to free pointer {:?} with error {:?}", my_ptr, err)
 );
 ```
 

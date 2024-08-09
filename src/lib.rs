@@ -139,12 +139,12 @@ impl<const B: usize> BlockNode<B> {
 
 
     /// Recursively try to free the given pointer.
-    pub fn free(&mut self, ptr: NonNull<u8>) -> Result<usize, AllocError> {
+    pub fn free(&mut self, ptr: NonNull<u8>) -> Result<usize, FreeError> {
         
         match &mut self.state {
 
             // Cannot free a free block.
-            BlockState::FreeLeaf => Err(AllocError::DoubleFree),
+            BlockState::FreeLeaf => Err(FreeError::DoubleFree),
 
             BlockState::Parent { left, right } => {
 
@@ -170,7 +170,7 @@ impl<const B: usize> BlockNode<B> {
                     self.state = BlockState::FreeLeaf;
                     Ok(self.size)
                 } else {
-                    Err(AllocError::UnalignedFree)
+                    Err(FreeError::UnalignedFree)
                 }
             },
         }
@@ -179,22 +179,30 @@ impl<const B: usize> BlockNode<B> {
 }
 
 
-/// Enum representing errors that may happen during allocation and freeing.
+/// Enum representing errors that may happen when freeing memory blocks.
+#[derive(Debug, Clone, Copy)]
+pub enum FreeError {
+
+    /// The memory chunk is already free
+    DoubleFree,
+    /// The pointer is not aligned with any allocated memory block
+    UnalignedFree,
+    /// The freed pointer was null
+    NullPtrFree,
+    /// The freed pointer was out of the heap bounds
+    FreeOutOfBounds
+
+}
+
+
+/// Enum representing errors that may happen when allocating of memory blocks.
 #[derive(Debug, Clone, Copy)]
 pub enum AllocError {
 
     /// Not enough memory to perform the requested allocation
     OutOfMemory,
-    /// The memory chunk is already free
-    DoubleFree,
-    /// The pointer is not aligned with any allocated memory block
-    UnalignedFree,
     /// The requested allocation size was 0 bytes
     ZeroAllocation,
-    /// The freed pointer was null
-    NullPtrFree,
-    /// The freed pointer was out of the heap bounds
-    FreeOutOfBounds
 
 }
 
@@ -307,7 +315,7 @@ where
 
     /// Free the memory block found at `ptr`.
     /// Note that the block must have been allocated through this allocator.
-    pub fn free_nonnull<T>(&mut self, ptr: NonNull<T>) -> Result<(), AllocError> {
+    pub fn free_nonnull<T>(&mut self, ptr: NonNull<T>) -> Result<(), FreeError> {
 
         // Drop the generic type. It's irrelevant which type the pointer points to.
         let ptr = unsafe {
@@ -316,7 +324,7 @@ where
 
         if ptr >= self.upper_memory_bound {
             // Cannot free memory outside of the allocator's heap
-            Err(AllocError::FreeOutOfBounds)
+            Err(FreeError::FreeOutOfBounds)
 
         } else {
 
@@ -336,12 +344,12 @@ where
 
     /// Free the memory block found at `ptr`.
     /// Note that the block must have been allocated through this allocator.
-    pub fn free<T>(&mut self, ptr: *const T) -> Result<(), AllocError> {
+    pub fn free<T>(&mut self, ptr: *const T) -> Result<(), FreeError> {
 
         if let Some(ptr) = NonNull::new(ptr as *mut u8) {
             self.free_nonnull(ptr)
         } else {
-            Err(AllocError::NullPtrFree)
+            Err(FreeError::NullPtrFree)
         }
     }
 
@@ -424,8 +432,8 @@ mod tests {
 
         let mut alloc = BuddyAllocator::<1024, 8>::new(false);
 
-        assert!(matches!(alloc.free(ptr::null() as *const u8), Err(AllocError::NullPtrFree)));
-        assert!(matches!(alloc.free(usize::MAX as *const u8), Err(AllocError::FreeOutOfBounds)));
+        assert!(matches!(alloc.free(ptr::null() as *const u8), Err(FreeError::NullPtrFree)));
+        assert!(matches!(alloc.free(usize::MAX as *const u8), Err(FreeError::FreeOutOfBounds)));
     }
 
 
