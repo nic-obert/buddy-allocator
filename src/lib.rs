@@ -3,6 +3,7 @@
 
 use std::mem::{self, MaybeUninit};
 use std::marker::PhantomPinned;
+use std::pin::Pin;
 use std::ptr::NonNull;
 
 use const_assert::{Assert, IsTrue};
@@ -242,7 +243,7 @@ where
 {
 
     /// Create a new allocator.
-    pub fn new(zero_initialized: bool) -> Self {
+    pub fn new(zero_initialized: bool) -> Pin<Box<Self>> {
 
         let memory = if zero_initialized {
             [MaybeUninit::<u8>::zeroed(); M]
@@ -250,14 +251,14 @@ where
             [MaybeUninit::<u8>::uninit(); M]
         };
 
-        let mut res = Self {
+        let mut res = Box::new(Self {
             memory,
             #[allow(invalid_value)]
             alloc_table: unsafe { MaybeUninit::uninit().assume_init() },
             upper_memory_bound: NonNull::dangling(),
             total_free: M,
             _pin: PhantomPinned::default()
-        };
+        });
 
         // Get the lower bound of the heap
         let base_ptr = unsafe { 
@@ -272,14 +273,14 @@ where
             NonNull::new_unchecked(base_ptr.as_ptr().byte_add(M))
         };
         
-        res
+        Box::into_pin(res)
     }
 
 
     /// Allocate a memory block big enough to store at least the size of `T`.
     /// Return a pointer to the start of the allocated block.
     /// Pointers allocated throuch this allocator must be freed through this allocator as well.
-    pub fn alloc<T>(&mut self) -> Result<NonNull<T>, AllocError> {
+    pub fn alloc<T>(self: Pin<&mut Self>) -> Result<NonNull<T>, AllocError> {
         unsafe {
             mem::transmute::<Result<NonNull<u8>, AllocError>, Result<NonNull<T>, AllocError>>(
                 self.alloc_bytes(mem::size_of::<T>())
@@ -291,20 +292,22 @@ where
     /// Allocate a memory block big enough to store at least `size` bytes.
     /// Return a pointer to the start of the allocated block.
     /// Pointers allocated throuch this allocator must be freed through this allocator as well.
-    pub fn alloc_bytes(&mut self, size: usize) -> Result<NonNull<u8>, AllocError> {
+    pub fn alloc_bytes(self: Pin<&mut Self>, size: usize) -> Result<NonNull<u8>, AllocError> {
+
+        let self_mut = unsafe { self.get_unchecked_mut() };
 
         if size == 0 {
             // Disallow allocating zero bytes.
             // Think: if zero bytes were to be allocated, what is the returned pointer supposed to point to?
             Err(AllocError::ZeroAllocation)
 
-        } else if size > self.total_free() {
+        } else if size > self_mut.total_free() {
             // Cannot ever allocate more than the total free memory
             Err(AllocError::OutOfMemory)
             
-        } else if let Some((ptr, allocated)) = self.alloc_table.alloc(size) {
+        } else if let Some((ptr, allocated)) = self_mut.alloc_table.alloc(size) {
             // Keep track of the free memory
-            self.total_free -= allocated;
+            self_mut.total_free -= allocated;
             Ok(ptr)
 
         } else {
@@ -315,24 +318,26 @@ where
 
     /// Free the memory block found at `ptr`.
     /// Note that the block must have been allocated through this allocator.
-    pub fn free_nonnull<T>(&mut self, ptr: NonNull<T>) -> Result<(), FreeError> {
+    pub fn free_nonnull<T>(self: Pin<&mut Self>, ptr: NonNull<T>) -> Result<(), FreeError> {
+
+        let self_data = unsafe { self.get_unchecked_mut() };
 
         // Drop the generic type. It's irrelevant which type the pointer points to.
         let ptr = unsafe {
             mem::transmute::<NonNull<T>, NonNull<u8>>(ptr)
         };
 
-        if ptr >= self.upper_memory_bound || (ptr.as_ptr() as usize) < (self.memory.as_ptr() as usize) {
+        if ptr >= self_data.upper_memory_bound || (ptr.as_ptr() as usize) < (self_data.memory.as_ptr() as usize) {
             // Cannot free memory outside of the allocator's heap
             Err(FreeError::FreeOutOfBounds)
 
         } else {
 
-            match self.alloc_table.free(ptr) {
+            match self_data.alloc_table.free(ptr) {
 
                 Ok(freed) => {
                     // Keep track of the free memory
-                    self.total_free += freed;
+                    self_data.total_free += freed;
                     Ok(())
                 },
 
@@ -344,7 +349,7 @@ where
 
     /// Free the memory block found at `ptr`.
     /// Note that the block must have been allocated through this allocator.
-    pub fn free<T>(&mut self, ptr: *const T) -> Result<(), FreeError> {
+    pub fn free<T>(self: Pin<&mut Self>, ptr: *const T) -> Result<(), FreeError> {
 
         if let Some(ptr) = NonNull::new(ptr as *mut u8) {
             self.free_nonnull(ptr)
@@ -406,9 +411,9 @@ mod tests {
 
         let mut alloc = BuddyAllocator::<1024, 8>::new(false);
 
-        assert!(matches!(alloc.alloc_bytes(0), Err(AllocError::ZeroAllocation)));
+        assert!(matches!(alloc.as_mut().alloc_bytes(0), Err(AllocError::ZeroAllocation)));
 
-        assert!(matches!(alloc.alloc_bytes(1025), Err(AllocError::OutOfMemory)));
+        assert!(matches!(alloc.as_mut().alloc_bytes(1025), Err(AllocError::OutOfMemory)));
     }
 
 
@@ -417,13 +422,13 @@ mod tests {
 
         let mut alloc = BuddyAllocator::<1024, 8>::new(false);
 
-        assert!(alloc.alloc_bytes(1).is_ok());
-        assert!(alloc.alloc_bytes(8).is_ok());
-        assert!(alloc.alloc_bytes(9).is_ok());
-        assert!(alloc.alloc_bytes(24).is_ok());
-        assert!(alloc.alloc_bytes(32).is_ok());
-        assert!(alloc.alloc_bytes(65).is_ok());
-        assert!(alloc.alloc_bytes(1000).is_err());
+        assert!(alloc.as_mut().alloc_bytes(1).is_ok());
+        assert!(alloc.as_mut().alloc_bytes(8).is_ok());
+        assert!(alloc.as_mut().alloc_bytes(9).is_ok());
+        assert!(alloc.as_mut().alloc_bytes(24).is_ok());
+        assert!(alloc.as_mut().alloc_bytes(32).is_ok());
+        assert!(alloc.as_mut().alloc_bytes(65).is_ok());
+        assert!(alloc.as_mut().alloc_bytes(1000).is_err());
     }
 
 
@@ -432,8 +437,8 @@ mod tests {
 
         let mut alloc = BuddyAllocator::<1024, 8>::new(false);
 
-        assert!(matches!(alloc.free(ptr::null() as *const u8), Err(FreeError::NullPtrFree)));
-        assert!(matches!(alloc.free(usize::MAX as *const u8), Err(FreeError::FreeOutOfBounds)));
+        assert!(matches!(alloc.as_mut().free(ptr::null() as *const u8), Err(FreeError::NullPtrFree)));
+        assert!(matches!(alloc.as_mut().free(usize::MAX as *const u8), Err(FreeError::FreeOutOfBounds)));
     }
 
 
@@ -447,11 +452,11 @@ mod tests {
         ];
 
         let ptrs: Vec<NonNull<u8>> = blocks.iter()
-            .map(|&s| alloc.alloc_bytes(s as usize).unwrap())
+            .map(|&s| alloc.as_mut().alloc_bytes(s as usize).unwrap())
             .collect();
 
         for ptr in ptrs {
-            assert!(alloc.free_nonnull(ptr).is_ok());
+            assert!(alloc.as_mut().free_nonnull(ptr).is_ok());
         }
 
         assert_eq!(alloc.total_free(), alloc.heap_size());
