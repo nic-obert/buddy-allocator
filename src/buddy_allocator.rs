@@ -32,7 +32,9 @@ where
     /// A binary  tree that keeps track of the allocated and free blocks.
     alloc_table: BlockNode<'a, B, {M / B}>,
 
+    /// Internal allocator used to allocate the `alloc_table` without relying on external allocators.
     proto_allocator: UnsafeCell<ProtoAllocator<{M / B}>>,
+    /// Pin to the proto allocator
     proto_allocator_pin: Pin<&'a mut ProtoAllocator<{M / B}>>,
 
     /// The highest address of the heap.
@@ -57,6 +59,54 @@ where
     // The compiler cannot recognize the type is indeed used
     #[allow(dead_code)]
     type PinnedProtoAllocator = Pin<&'a mut ProtoAllocator<{M / B}>>;
+
+
+    pub unsafe fn new_unpinned(zero_initialized: bool) -> Self {
+
+        let memory = if zero_initialized {
+            [MaybeUninit::<u8>::zeroed(); M]
+        } else {
+            [MaybeUninit::<u8>::uninit(); M]
+        };
+
+        let res = Self {
+            memory,
+            #[allow(invalid_value)]
+            alloc_table: unsafe { MaybeUninit::uninit().assume_init() },
+            proto_allocator: UnsafeCell::new(unsafe { FixedSizeAllocator::<{block_node_size!()}, {M / B}>::new_unpinned(false) }),
+            proto_allocator_pin: unsafe { Pin::new_unchecked(mem::transmute(NonNull::<Self::PinnedProtoAllocator>::dangling())) },
+            upper_memory_bound: NonNull::dangling(),
+            total_free: M,
+            _pin: PhantomPinned::default()
+        };
+
+        res
+    }
+
+
+    pub unsafe fn init_pinned(self: Pin<&mut Self>) {
+
+        let self_data = unsafe { self.get_unchecked_mut() };
+        
+        // Get the lower bound of the heap
+        let base_ptr = unsafe { 
+            NonNull::new_unchecked(self_data.memory.as_mut_ptr() as *mut u8)
+        };
+
+        // Initialize the allocation table
+        self_data.alloc_table = BlockNode::new(M, base_ptr);
+
+        // Calculate the upper bound of the heap
+        self_data.upper_memory_bound = unsafe {
+            NonNull::new_unchecked(base_ptr.as_ptr().byte_add(M))
+        };
+
+        // Store a pin to the proto allocator
+        self_data.proto_allocator_pin = unsafe {
+            Pin::new_unchecked(self_data.proto_allocator.get().as_mut_unchecked())
+        };
+    }    
+
 
     /// Create a new allocator.
     pub fn new(zero_initialized: bool) -> Pin<Box<Self>> {
@@ -91,9 +141,9 @@ where
             NonNull::new_unchecked(base_ptr.as_ptr().byte_add(M))
         };
         
+        // Store a pin to the proto allocator
         res.as_mut().proto_allocator_pin = unsafe {
             Pin::new_unchecked(res.proto_allocator.get().as_mut_unchecked())
-            // Pin::new_unchecked(&mut res.proto_allocator)
         };
         
         Box::into_pin(res)
