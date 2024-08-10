@@ -5,7 +5,5 @@ edition = "2021"
 
 [dependencies]
 const-assert = "1.0.1"
-
-[dev-dependencies]
-lazy_static = "1.5.0"
-once_cell = "1.19.0"
+fixed-size-allocator = "0.1.1"
+static_assertions = "1.1.0"

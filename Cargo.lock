@@ -7,8 +7,8 @@ name = "buddy_allocator"
 version = "0.1.0"
 dependencies = [
  "const-assert",
- "lazy_static",
- "once_cell",
+ "fixed-size-allocator",
+ "static_assertions",
 ]
 
 [[package]]
@@ -18,13 +18,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8298db53081b3a951cadb6e0f4ebbe36def7bcb591a34676708d0d7ac87dd86"
 
 [[package]]
-name = "lazy_static"
-version = "1.5.0"
+name = "fixed-size-allocator"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
+checksum = "43496b217c0fc804d6ea842ed49889eb1f4b21f936b67cb648feaccb1dce9fd8"
+dependencies = [
+ "const-assert",
+]
 
 [[package]]
-name = "once_cell"
-version = "1.19.0"
+name = "static_assertions"
+version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3fdb12b2476b595f9358c5161aa467c2438859caa136dec86c26fdd2efe17b92"
+checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
